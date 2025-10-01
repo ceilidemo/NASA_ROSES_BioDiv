@@ -1,3 +1,5 @@
+### R ###
+
 # History files
 .Rhistory
 .Rapp.history
@@ -25,7 +27,7 @@
 vignettes/*.html
 vignettes/*.pdf
 
-# OAuth2 token, see https://github.com/hadley/httr/releases/tag/v0.3
+# OAuth2 token
 .httr-oauth
 
 # knitr and R markdown default cache directories
@@ -47,3 +49,96 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+### Python ###
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Jupyter/IPython
+profile_default/
+ipython_config.py
+*.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# mypy
+.mypy_cache/
+
+# pyright
+pyrightconfig.json
+
+# Pyre
+.pyre/
+
+# pytype
+.pytype/
+
+# VS Code
+.vscode/
+
+# Cython
+cython_debug/
+
+### macOS ###
+.DS_Store
+
+### General ###
+*~
+*.bak
+*.swp
+*.swo
