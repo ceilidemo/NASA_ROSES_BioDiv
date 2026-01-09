@@ -24,13 +24,6 @@ structure_all <- loadByProduct(
   include.provisional = TRUE
 )
 
-# filter to have the latest for each site
-latest_cover_data <- cover_all$div_1m2Data %>%
-  group_by(siteID, plotID, subplotID) %>%
-  slice_max(endDate, n = 1, with_ties = FALSE) %>%
-  ungroup()
+#save it all
+save(structure_all, cover_all, file = "data_in/veg_data.RData")
 
-latest_structure_data <- structure_all$vst_apparentindividual %>%
-  group_by(siteID, plotID, individualID) %>%
-  slice_max(date, n = 1, with_ties = FALSE) %>%
-  ungroup()

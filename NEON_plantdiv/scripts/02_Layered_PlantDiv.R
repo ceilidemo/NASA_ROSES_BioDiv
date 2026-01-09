@@ -1,133 +1,109 @@
-## 02_Layered_PlantDiv: Standardized Naming and Hill Number Conversion
+## 02_Layered_PlantDiv: "Layered" diversity calculation taking footprints from various levels of canopy
+
 library(vegan)
 library(tidyverse)
-library(FD)
 library(V.PhyloMaker2)
 
-# Function for abundance-weighted TD: 
-calc_abundance_div <- function(df) {
-  comm <- df %>% # comm matrix
-    group_by(plotID, taxonID) %>%
-    summarize(total_area = sum(total_area, na.rm = TRUE), .groups = "drop") %>% # summ tot area for each spc in each plot
-    pivot_wider(names_from = taxonID, values_from = total_area, values_fill = 0) %>% # row -> plot, col -> species
-    column_to_rownames("plotID")
-  
-  site_totals <- colSums(comm) # just to grab tot abundance 
-  
-  # Diversity calcs
-  richness <- specnumber(site_totals) # count unique spec
-  gamma_shannon_eff <- exp(diversity(site_totals, index = "shannon")) # shannon: weighted common spec (converted to eff)
-  gamma_simpson_eff <- 1/diversity(site_totals, index = "simpson") # simpson: weighted dom spec (convert to eff)
-  
-  # Beta div ! (Bray-Curtis)
-  if(nrow(comm) > 1) {
-    beta_bray <- mean(vegdist(comm, method = "bray"), na.rm = TRUE)
-  } else {
-    beta_bray <- NA # if only 1 plot 
-  }
-  
-  return(data.frame(
-    TD_Richness = richness,
-    TD_Shannon_Eff = gamma_shannon_eff,
-    TD_Simpson_Eff = gamma_simpson_eff,
-    TD_Beta = beta_bray
-  ))
-}
+# load community data if not
+load("data_out/community.RData")
 
-#######################
-# Clean data 
-layered <- merge_long %>%
-  group_by(siteID, plotID, taxonID, is_abiotic) %>% 
-  summarize(total_area = sum(area_m2, na.rm = TRUE), .groups = "drop") %>% 
-  filter(total_area < 1000) # filter for any random mis-entries like a HUGE tree
+# Diversity functions:
 
-layered_veg_results <- layered %>%
-  filter(!is_abiotic) %>% # get rid of the abiotic tags
-  group_by(siteID) %>%
-  group_modify(~ calc_abundance_div(.x)) %>%
-  mutate(Scope = "Veg Only")
-
-#######################
-# Function for PD (Rao's Q) 
-calc_rao_partition <- function(df, phylo_dist) {
+## Taxonomic (Hilll Numbers)
+calc_t_div <- function(df) {
   comm <- df %>%
     group_by(plotID, taxonID) %>%
-    summarize(total_area = sum(total_area, na.rm = TRUE), .groups = "drop") %>%
+    summarize(total_area = sum(area_m2, na.rm = TRUE), .groups = "drop") %>%
     pivot_wider(names_from = taxonID, values_from = total_area, values_fill = 0) %>%
     column_to_rownames("plotID")
   
-  common_sp <- intersect(colnames(comm), rownames(phylo_dist)) #match the spec in site with those in tree
+  site_totals <- colSums(comm)
+  
+  richness <- specnumber(site_totals)
+  shannon_eff <- exp(diversity(site_totals, index = "shannon"))
+  simpson_eff <- 1/diversity(site_totals, index = "simpson")
+  
+  beta_bray <- if(nrow(comm) > 1) mean(vegdist(comm, method = "bray"), na.rm = TRUE) else NA
+  
+  return(data.frame(TD_Richness = richness, TD_Shannon_Eff = shannon_eff, 
+                    TD_Simpson_Eff = simpson_eff, TD_Beta = beta_bray))
+}
+
+## Phylo (Rao's Q Partitioning)
+calc_p_div <- function(df, phylo_dist) {
+  comm <- df %>%
+    group_by(plotID, taxonID) %>%
+    summarize(total_area = sum(area_m2, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = taxonID, values_from = total_area, values_fill = 0) %>%
+    column_to_rownames("plotID")
+  
+  common_sp <- intersect(colnames(comm), rownames(phylo_dist))
   if(length(common_sp) == 0) return(data.frame(PD_Alpha = NA, PD_Beta = NA, PD_Gamma = NA))
   
   comm_matched <- as.matrix(comm[, common_sp, drop = FALSE])
   dist_matched <- as.matrix(phylo_dist[common_sp, common_sp])
   
-  # avg evol dist for each plto 
   rao_alphas <- apply(comm_matched, 1, function(x) { 
     if(sum(x) <= 0) return(0)
     p <- x / sum(x)
-    return(sum(outer(p, p) * dist_matched)) # weighted dist btw pairs 
+    return(sum(outer(p, p) * dist_matched))
   })
   
-  # gamma totals across site
   site_totals <- colSums(comm_matched)
   p_gamma <- site_totals / sum(site_totals)
   gamma_rao <- sum(outer(p_gamma, p_gamma) * dist_matched)
   
-  # beta -> turnover (doing in additive way with gamma-alpha) 
-  return(data.frame(
-    PD_Alpha = mean(rao_alphas, na.rm = TRUE),
-    PD_Beta = gamma_rao - mean(rao_alphas, na.rm = TRUE),
-    PD_Gamma = gamma_rao
-  ))
+  return(data.frame(PD_Alpha = mean(rao_alphas, na.rm = TRUE), 
+                    PD_Beta = gamma_rao - mean(rao_alphas, na.rm = TRUE), 
+                    PD_Gamma = gamma_rao))
 }
 
-#######################
-# Generate phylo tree
-lookup <- cover_all$div_1m2Data %>%
-  select(taxonID, scientificName, taxonRank, family) %>%
-  filter(!is.na(taxonID) & taxonID != "") %>%
-  distinct() %>%
-  mutate(phyloName = case_when(
-    taxonRank == "species" ~ str_replace_all(scientificName, "\\s+", "_"),
-    TRUE ~ taxonID
-  ))
-
-name_map <- lookup %>% select(taxonID, phyloName) %>% distinct()
-
-layered_phylo_ready <- layered %>%
-  filter(!is_abiotic) %>% # get rid abiotic 
-  left_join(name_map, by = "taxonID") %>%
-  mutate(taxonID = coalesce(phyloName, taxonID))
-
-sp_list <- layered_phylo_ready %>% # get just spc list for tree
-  distinct(taxonID) %>%
-  rename(species = taxonID) %>%
+# Generate Phylogeny
+sp_list <- taxon_lookup %>%
+  filter(taxonRank == "species") %>%
+  rename(species = phyloName) %>%
   mutate(genus = gsub("_.*", "", species)) %>%
-  left_join(lookup %>% select(phyloName, family) %>% distinct(), by = c("species" = "phyloName")) %>%
-  filter(!is.na(family))
+  distinct(species, .keep_all = TRUE)
 
 data("nodes.info.1.TPL", package = "V.PhyloMaker2")
-sp_list_corrected <- sp_list %>% # Correct the names with the ones that are in v.phylomaker2
+sp_list_corrected <- sp_list %>%
   mutate(family_new = nodes.info.1.TPL$family[match(genus, nodes.info.1.TPL$genus)]) %>%
   mutate(family = coalesce(family_new, family)) %>%
-  select(-family_new)
+  select(species, genus, family)
 
-tre <- phylo.maker(sp.list = sp_list_corrected, tree = GBOTB.extended.TPL,  # generate tree using basic GBOTB backbone
+tre <- phylo.maker(sp.list = sp_list_corrected, tree = GBOTB.extended.TPL, 
                    nodes = nodes.info.1.TPL, scenarios = "S3")
-dist_phylo <- as.matrix(cophenetic(tre$scenario.3)) # get the ditance between each in the tree 
+dist_phylo <- as.matrix(cophenetic(tre$scenario.3))
 
-#######################
-# get PD for each site 
-layered_rao_results <- layered_phylo_ready %>%
+# Get the names to match the phylogeny for calcs
+layered_ready <- bind_rows(
+  ground_df %>% mutate(area_m2 = (mean_pct / 100) * 400),
+  shrubs_df,
+  trees_df %>% select(siteID, plotID, taxonID, area_m2, is_abiotic)
+) %>%
+  filter(!is_abiotic) %>%
+  left_join(taxon_lookup %>% select(taxonID, phyloName), by = "taxonID") %>%
+  mutate(taxonID = coalesce(phyloName, taxonID)) %>%
+  inner_join(plot_metadata %>% filter(plotType == "distributed") %>% select(plotID), by = "plotID") %>%
+  group_by(siteID, plotID, taxonID) %>%
+  summarize(area_m2 = sum(area_m2, na.rm = TRUE), .groups = "drop") %>%
+  mutate(area_m2 = pmin(area_m2, 400))
+  
+# ok now actually calculate div
+layered_td <- layered_ready %>%
   group_by(siteID) %>%
-  group_modify(~ calc_rao_partition(.x, dist_phylo))
+  group_modify(~ calc_t_div(.x))
 
-#join TD with PD
-layered_master_table <- layered_veg_results %>%
-  left_join(layered_rao_results, by = "siteID") %>%
-  select(siteID, Scope, starts_with("TD_"), starts_with("PD_")) %>%
+layered_pd <- layered_ready %>%
+  group_by(siteID) %>%
+  group_modify(~ calc_p_div(.x, dist_phylo))
+
+# join and save it
+layered_master_table <- layered_td %>%
+  left_join(layered_pd, by = "siteID") %>%
   mutate(across(where(is.numeric), ~round(., 4)))
 
-# save it 
 write.csv(layered_master_table, "data_out/NEON_Layered_Diversity_Results.csv", row.names = FALSE)
+
+# save phylogeny to use for the top down view :) 
+save(dist_phylo, taxon_lookup, file = "data_out/phylo.RData")

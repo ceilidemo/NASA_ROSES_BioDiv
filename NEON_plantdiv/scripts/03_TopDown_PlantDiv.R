@@ -1,13 +1,17 @@
-## 03_TopDown_PlantDiv: Fixed with latest-visit filtering and geometric clipping
+## 03_TopDown_PlantDiv: "Top-down" view plant diversity calcs
+
 library(dplyr)
 library(tidyr)
 library(sf)
 library(purrr)
-library(ggplot2)
+library(vegan)
 
-#######################
-# function for dealing with overlapping crowns below
-clip_overlapping_crowns <- function(df) {
+# Get community and phylo data
+load("data_out/community.RData")
+load("data_out/phylo.RData")
+
+# clipping function dealing with crown dynamics etc 
+clip_overlapping_crowns <- function(df, plot_bbox) {
   if (nrow(df) == 0) return(NULL)
   
   visible_geoms <- list()
@@ -35,112 +39,86 @@ clip_overlapping_crowns <- function(df) {
       }
     }
   }
-  
-  if (length(visible_geoms) == 0) return(NULL)
-  return(bind_rows(visible_geoms))
+  return(if(length(visible_geoms) > 0) bind_rows(visible_geoms) else NULL)
 }
 
-#######################
-# Data clean and set up mapping 
-# Took all the str since they don't do it every year... so took just the latest year/ most recent
-latest_structure <- structure_all$vst_apparentindividual %>%
-  group_by(individualID) %>% filter(date == max(date, na.rm = TRUE)) %>% slice(1) %>% ungroup()
-
-# get the mapped locations of the trees
-latest_mapping <- structure_all$vst_mappingandtagging %>% distinct(individualID, .keep_all = TRUE)
-
-# get relative location in the plots (NEON does it by azimuth)
-mapped_trees <- latest_mapping %>%
-  select(individualID, plotID, stemDistance, stemAzimuth, taxonID) %>%
-  inner_join(latest_structure %>% select(individualID, height, maxCrownDiameter), by = "individualID") %>%
-  mutate(siteID = substr(plotID, 1, 4), crown_radius = maxCrownDiameter / 2,
-         theta = stemAzimuth * pi / 180, x = stemDistance * sin(theta), y = stemDistance * cos(theta)) %>%
-  filter(!is.na(x), !is.na(y), !is.na(crown_radius))
-
-# create poly around location and crown radius
-canopy_polys <- mapped_trees %>% st_as_sf(coords = c("x", "y")) %>% st_buffer(dist = .$crown_radius)
+# set up spatial enviro
 plot_bbox <- st_polygon(list(matrix(c(-10,-10, 10,-10, 10,10, -10,10, -10,-10), ncol=2, byrow=TRUE))) %>% 
-  st_sfc() %>% st_set_crs(st_crs(canopy_polys))
+  st_sfc()
 
-# arrange by height and then deal with the overlapping crowns
-canopy_visible_final <- canopy_polys %>% arrange(plotID, desc(height)) %>%
-  group_by(plotID) %>% group_split() %>%
-  map_dfr(clip_overlapping_crowns) 
+# map thee trees
+canopy_polys <- structure_all$vst_mappingandtagging %>%
+  distinct(individualID, .keep_all = TRUE) %>%
+  inner_join(trees_df %>% select(individualID, height, area_m2), by = "individualID") %>%
+  mutate(theta = stemAzimuth * pi / 180, 
+         x = stemDistance * sin(theta), 
+         y = stemDistance * cos(theta),
+         rad = sqrt(area_m2/pi)) %>%
+  filter(!is.na(x)) %>% 
+  st_as_sf(coords = c("x", "y")) %>% 
+  st_buffer(dist = .$rad)
 
-# Calculate how much of the plot area is NOT covered by thee trees 
-gap_summary <- canopy_visible_final %>% st_drop_geometry() %>%
-  group_by(plotID) %>% summarize(total_visible_canopy = sum(visible_area, na.rm = TRUE)) %>%
-  mutate(gap_fraction = pmax(0, (400 - total_visible_canopy) / 400))
+# run that func
+canopy_visible <- canopy_polys %>% 
+  arrange(plotID, desc(height)) %>% 
+  group_by(plotID) %>% 
+  group_split() %>% 
+  map_dfr(~clip_overlapping_crowns(.x, plot_bbox))
 
-# merge all the layers (vis trees, shrub, herb) and scale by gap calculated 
-topdown_master_table <- bind_rows(
-  canopy_visible_final %>% st_drop_geometry() %>% select(siteID, plotID, taxonID, area_m2 = visible_area),
-  latest_shrubgroups %>% select(siteID, plotID, taxonID, area_m2),
+# calc gap fraction (what parts are not covered by trees)
+gap_summary <- canopy_visible %>% 
+  st_drop_geometry() %>% 
+  group_by(plotID) %>% 
+  summarize(tree_area = sum(visible_area), .groups = "drop") %>%
+  left_join(shrubs_df %>% group_by(plotID) %>% summarize(s_area = sum(area_m2), .groups = "drop"), by = "plotID") %>%
+  mutate(gap_frac = pmax(0, (400 - tree_area - replace_na(s_area, 0)) / 400))
+
+# using that logic now we need new community for top-down
+# get rid of abiotic: 
+abiotic_ids <- c("lichen", "moss", "fungi", "biocrustMoss", "biocrustLichen", 
+                 "biocrustLightCyanobacteria", "biocrustDarkCyanobacteria", 
+                 "standingDead", "standingDeadWoody", "standingDeadHerbaceous", 
+                 "litter", "wood", "soil", "rock", "scat", "bare ground", "water", "otherNonVascular")
+
+# get comm
+topdown_ready <- bind_rows(
+  canopy_visible %>% st_drop_geometry() %>% select(siteID, plotID, taxonID, area_m2 = visible_area),
+  shrubs_df %>% select(siteID, plotID, taxonID, area_m2),
   ground_df %>% left_join(gap_summary, by = "plotID") %>% 
-    mutate(area_m2 = (mean_pct / 100) * (400 * replace_na(gap_fraction, 1)))
-) %>% filter(area_m2 > 0)
+    mutate(area_m2 = (mean_pct/100) * 400 * replace_na(gap_frac, 1))
+) %>%
+  filter(!taxonID %in% abiotic_ids) %>%
+  left_join(taxon_lookup %>% select(taxonID, phyloName), by = "taxonID") %>%
+  mutate(taxonID = coalesce(phyloName, taxonID)) %>%
+  inner_join(plot_metadata %>% filter(plotType == "distributed") %>% select(plotID), by = "plotID") %>%
+  group_by(siteID, plotID, taxonID) %>%
+  summarize(area_m2 = sum(area_m2, na.rm = TRUE), .groups = "drop")
 
-##############################
-# Calculate div whoop whoop 
-
-# join NEon names to the phylo 
-topdown_phylo_ready <- topdown_master_table %>%
-  left_join(name_map, by = "taxonID") %>%
-  mutate(taxonID = coalesce(phyloName, taxonID))
-
-topdown_matrix <- topdown_phylo_ready %>%
-  group_by(siteID, taxonID) %>% summarize(total_area = sum(area_m2), .groups = "drop") %>%
-  pivot_wider(names_from = taxonID, values_from = total_area, values_fill = 0) %>%
-  column_to_rownames("siteID")
-
-# Get hill number calcs for TD
-td_hill_results <- data.frame(siteID = rownames(topdown_matrix)) %>%
-  mutate(
-    TD_Richness = specnumber(topdown_matrix),
-    TD_Shannon_Eff = exp(diversity(topdown_matrix, index = "shannon")),
-    TD_Simpson_Eff = 1/diversity(topdown_matrix, index = "simpson")
-  )
-
-# Get PD Rao Q 
-pd_rao_results <- topdown_phylo_ready %>%
+# calc div
+topdown_td <- topdown_ready %>%
   group_by(siteID) %>%
-  group_modify(~ {
-    calc_rao_partition(.x %>% rename(total_area = area_m2), dist_phylo)
-  })
+  group_modify(~ calc_t_div(.x))
 
-# TD beta attempt (idk if this makes complete sense, but looking at avg difference btw plots on what's visible)
-td_beta_values <- topdown_phylo_ready %>%
+topdown_pd <- topdown_ready %>%
   group_by(siteID) %>%
-  group_modify(~ {
-    site_mat <- .x %>% group_by(plotID, taxonID) %>% summarize(area = sum(area_m2), .groups = "drop") %>%
-      pivot_wider(names_from = taxonID, values_from = area, values_fill = 0) %>% column_to_rownames("plotID")
-    if(nrow(site_mat) > 1) return(data.frame(TD_Beta = mean(vegdist(site_mat, method = "bray"))))
-    return(data.frame(TD_Beta = 0))
-  })
+  group_modify(~ calc_p_div(.x, dist_phylo))
 
-############################################
-# Joiin results and save
-final_topdown_diversity <- td_hill_results %>% 
-  left_join(td_beta_values, by = "siteID") %>%
-  left_join(pd_rao_results, by = "siteID") %>%
+# join and save
+final_topdown_results <- topdown_td %>%
+  left_join(topdown_pd, by = "siteID") %>%
   mutate(across(where(is.numeric), ~round(., 4)))
 
-write.csv(final_topdown_diversity, "data_out/NEON_TopDown_Diversity_Results.csv", row.names = FALSE)
+write.csv(final_topdown_results, "data_out/NEON_TopDown_Diversity_Results.csv", row.names = FALSE)
 
-
-
-############################################
-############################################
-############################################
-# PLOT CHECK IF MAKES SENSE 
+###################################################
+###################################################
+# MAPPING CHECK #
 
 site_to_check <- "MOAB" 
 
-# Filter data to that site
-site_map_data <- canopy_visible_final %>% 
+site_map_data <- canopy_visible %>% 
   filter(grepl(site_to_check, plotID))
 
-# plot all the plots for that site with the mapped crowns
 ggplot() +
   geom_sf(data = plot_bbox, fill = "gray95", color = "black", linetype = "dashed") +
   geom_sf(data = site_map_data, aes(fill = taxonID), alpha = 0.8, color = "white", size = 0.1) +
